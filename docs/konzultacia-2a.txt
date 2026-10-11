@@ -1,0 +1,177 @@
+====== Konzultácia 2a – Návrh riešenia ======
+**Tím:** Peter Biely \\
+**Termín:** 14. 10. 2026
+
+===== 1. Frameworky =====
+
+^ Časť ^ Nástroj ^ Prečo ^
+| Jazyk | Python 3.13 | |
+| Renderovanie stránok | Playwright 1.63 (headless Chromium) | nhl.com posiela iba prázdnu HTML kostru, dáta o hráčoch dopĺňa JavaScript (pozri nižšie) |
+| Statické stránky (sitemap, stránky trénerov) | ''urllib'' zo štandardnej knižnice | tieto stránky majú obsah priamo v HTML, renderovanie netreba |
+| Crawler (fronta, navštívené URL, robots.txt, oneskorenia, ukladanie) | vlastná implementácia, štandardná knižnica Pythonu | bez Scrapy a podobných frameworkov |
+| Extrakcia odkazov a dát | regulárne výrazy (modul ''re'') | bez BeautifulSoup/lxml |
+
+**Prečo headless prehliadač:** Server pri žiadosti o stránku hráča (napr. ''/canadiens/player/juraj-slafkovsky-8483515/bio'') vráti HTML, ktoré neobsahuje žiadne údaje o hráčovi. Chýba v ňom narodenie, výška, draft, štatistiky aj text biografie, napr. „Kosice“ sa v ňom nachádza 0-krát. Okrem titulku a URL je HTML stránok Bio a Stats úplne rovnaké. Údaje, ktoré vidno v prehliadači (cez Inspect), doplní JavaScript až po načítaní stránky. Preto crawler stránku vyrenderuje v headless Chromiu a uloží výsledné HTML, v ktorom sú všetky údaje.
+
+===== 2. Architektúra crawlera =====
+
+<code>
+                 +---------------------------+
+  seed URL ----> |  Frontier (FIFO fronta +  | <--- frontier.json (pokračovanie po prerušení)
+  /info/teams    |  množina navštívených URL)|
+  /stats/skaters |                           |
+  /stats/goalies |                           |
+  sitemap.xml    |                           |
+                 +-------------+-------------+
+                               | ďalšia URL
+                               v
+                 +---------------------------+
+                 |  robots.txt kontrola      |  (vlastný parser, podporuje * a $)
+                 +-------------+-------------+
+                               | povolená
+                               v
+                 +---------------------------+       api-web.nhle.com
+                 |  Fetcher – Playwright     | <---> (stránka si sama načíta dáta)
+                 |  headless Chromium        |
+                 |  - blokuje reklamy,       |
+                 |    obrázky, fonty         |
+                 |  - čaká, kým sa vykreslia |
+                 |    dáta (CSS selektor)    |
+                 |  statické stránky: urllib |
+                 +------+-------------+------+
+                        |             | chyba / timeout / 429 / 5xx
+                        |             +----> opakovanie (max 3x, 10/20/40 s)
+                        v
+     +------------------+------------------+
+     |                                     |
+     v                                     v
++------------------------+   +----------------------------------+
+| Úložisko               |   | Extrakcia odkazov (regex)        |
+| data/raw/...html       |   | teams    -> /<tím>/roster        |
+| data/manifest.tsv      |   | roster   -> /player/<id>         |
+| data/crawl_log.tsv     |   | stats    -> /player/<id>,        |
++------------------------+   |             ďalšia strana        |
+                             | sitemap  -> stránky trénerov     |
+                             | hráč     -> /home, /bio, /stats  |
+                             +----------------+-----------------+
+                                             | nové URL (bez duplikátov)
+                                             +----> späť do Frontier
+
+   medzi dvoma stránkami: náhodná pauza 2–4 s
+</code>
+
+**Zdroje:**
+  * **Súčasní hráči:** stránka so zoznamom tímov (''/info/teams'') -> súpisky 32 tímov (''/<tím>/roster'') -> stránky hráčov (Home, Bio, Stats).
+  * **Bývalí hráči:** tabuľky štatistík za všetky sezóny od 1917 (''/stats/skaters'' ~80 strán, ''/stats/goalies'' ~10 strán, po 100 hráčov) -> približne 8 900 hráčov. Tlačidlo „ďalšia strana“ nie je odkaz, takže crawler si URL ďalšej strany vytvorí sám, kým je strana plná (100 hráčov).
+  * **Tréneri:** ''sitemap.xml'' -> stránky trénerského štábu tímov (statické HTML s biografiami). URL sa líšia podľa tímu (''/team/coaching-staff'', ''/team/coaches'', ''/team/hockey-operations'', ...), regex ich nájde pre 25 z 32 tímov.
+
+**Identita stránky (deduplikácia):** hráča identifikuje dvojica (ID, podstránka), napr. ''player:8483515:bio''. Rovnakú stránku tak crawler nestiahne dvakrát, aj keď na ňu vedie viac rôznych URL: ''/player/8483515'', ''/canadiens/player/juraj-slafkovsky-8483515'', URL s ''ý'' aj s ''%C3%BD'', alebo URL starého tímu pri prestupe.
+
+===== 3. Hlavičky, timeout, sleep =====
+
+^ Hlavička ^ Hodnota ^
+| User-Agent | ''Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 VINF-NHL-crawler/0.1 (FIIT STU school project)'' |
+| Accept-Language | ''en-US,en;q=0.9'' |
+| Accept (statické stránky, urllib) | ''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'' |
+| ostatné pri renderovaní (Accept, Accept-Encoding, ...) | štandardné hlavičky Chromia |
+
+^ Parameter ^ Hodnota ^
+| Pauza medzi stránkami | náhodne 2–4 s (alebo Crawl-delay z robots.txt, ak je väčší); stránky, ktoré už sú uložené na disku, sa nesťahujú, takže pri nich sa nečaká |
+| Timeout načítania stránky | 30 s (renderované aj statické stránky) |
+| Timeout na vykreslenie dát | 20 s; čaká sa, kým sa objaví prvok, ktorý vznikne až po načítaní dát: odkaz na hráča (súpiska, tabuľka štatistík), ''text=Birthplace'' (Bio), ''main table'' (Stats), záložky Home/Bio/Stats (Home). Selektor slúži iba na čakanie, dáta sa z neho neextrahujú. |
+| Opakovanie pri chybe | max. 3-krát, čakanie 10 / 20 / 40 s (rešpektuje Retry-After pri 429) |
+| Blokované požiadavky | obrázky, video, fonty a všetko mimo domén nhl.com / nhle.com (reklamy, trackery) |
+| robots.txt | dodržiavaný; nhl.com zakazuje iba ''/js/'', ''/css/'', ''/search'', ''/_*'' a pod. |
+
+===== 4. Implementácia =====
+
+^ Súbor ^ Úloha ^
+| ''crawl.py'' | hlavný cyklus: fronta -> robots -> stiahnutie (render alebo urllib) -> uloženie -> odkazy -> pauza |
+| ''crawler/config.py'' | User-Agent, hlavičky, pauzy, timeouty, cesty |
+| ''crawler/urls.py'' | regulárne výrazy pre typy stránok, normalizácia URL, extrakcia odkazov |
+| ''crawler/robots.py'' | vlastný parser robots.txt (podpora ''*'' a ''$'') |
+| ''crawler/frontier.py'' | fronta a navštívené URL, ukladanie do JSON |
+| ''crawler/browser.py'' | Playwright fetcher |
+| ''crawler/http.py'' | fetcher pre statické stránky (urllib) |
+| ''crawler/storage.py'' | ukladanie stránok bez prepisovania, ''manifest.tsv'', ''crawl_log.tsv'' |
+| ''stats.py'' | prehľad stiahnutých dát (stránky, hráči podľa tímov, tréneri, MB na disku) |
+
+Spúšťanie:
+<code>
+python crawl.py                          # všetky zdroje, pokračuje tam, kde skončil
+python crawl.py --sources coaches        # iba vybrané zdroje: rosters, alltime, coaches
+python crawl.py --teams canadiens        # súpisky a trénerov len vybraných tímov
+python crawl.py --fresh                  # fronta odznova, uložené stránky sa čítajú z disku
+python crawl.py --fresh --recrawl        # stiahnuť znova, nová verzia vedľa starej
+python stats.py
+</code>
+
+Typy stránok (regex):
+<code>
+roster:   ^https://www\.nhl\.com/([a-z]+)/roster/?$
+hráč:     ^https://www\.nhl\.com/(?:([a-z]+)/)?player/([^/]+)-(\d+)(?:/(home|bio|stats))?/?$
+          (bývalí hráči nemajú v URL tím: /player/wayne-gretzky-8447400/stats)
+hráč:     ^https://www\.nhl\.com/player/(\d+)/?$          (odkazy zo súpisky a tabuliek, presmeruje na /stats)
+tabuľka:  ^https://www\.nhl\.com/stats/(skaters|goalies)\?.*\bpage=(\d+)
+tréneri:  ^https://www\.nhl\.com/([a-z]+)/(?:team|equipe)/(coaching-staff|coaches|hockey-operations|...)(/<meno>)?/?$
+</code>
+
+Rýchlosť: približne 3–8 s na vykreslenie stránky + 2–4 s pauza, statické stránky trénerov < 1 s. Celý crawl (~8 900 hráčov × 3 podstránky ≈ 27 000 stránok, približne 6 GB) trvá 2–3 dni. Po prerušení crawler pokračuje tam, kde skončil.
+
+===== 5. Ukladanie dát a stiahnuté stránky =====
+
+Bez databázy, všetko v súboroch. Nič sa neprepisuje ani nemaže: každé stiahnutie je nový súbor pomenovaný časom stiahnutia. Opätovný crawl uloží novú verziu vedľa starej.
+
+<code>
+data/
+  manifest.tsv            1 riadok na každú uloženú stránku (iba sa dopĺňa)
+  crawl_log.tsv           1 riadok na každý pokus: ok, partial, failed, retry, cached, robots
+  frontier.json           fronta + navštívené URL (pokračovanie po prerušení)
+  raw/
+    teams/<čas>.html
+    rosters/<tím>/<čas>.html
+    players/<id>/home/<čas>.html    – hlavička hráča, posledný/ďalší zápas
+    players/<id>/bio/<čas>.html     – text „About …“, výška, váha, držanie hokejky, narodenie, národnosť, draft
+    players/<id>/stats/<čas>.html   – tabuľky štatistík po sezónach a kariéra
+    statlists/{skaters,goalies}/page-NNN/<čas>.html   – tabuľky so 100 hráčmi
+    sitemap/<čas>.xml
+    coaches/<tím>/<stránka>/<čas>.html                – mená, funkcie a biografie trénerov
+</code>
+
+''manifest.tsv'' (stĺpce ''ts key page_type status url final_url http_status bytes sha1 render_s file'') sa načíta do pamäte. Pre každú stránku (''key'', napr. ''player:8483515:bio'') je aktuálna verzia posledný riadok. Pri ďalšom spustení crawler stránky, ktoré už má uložené, znova nesťahuje: načíta ich z disku a iba z nich vyberie odkazy. Na odovzdanie sa dáta balia do zip.
+
+Ukážka z ''crawl_log.tsv'' (testovacie behy):
+<code>
+status  page_type  key                                      bytes    render_s
+ok      roster     roster:canadiens                         176512   9.6
+ok      player     player:8481540:bio                       214857   7.4
+ok      statlist   statlist:skaters:0                       300314   3.1
+ok      statlist   statlist:goalies:0                       278856   1.8
+ok      player     player:8447400:stats                     229199   3.5    (Wayne Gretzky)
+ok      player     player:8447400:bio                       158418   2.9
+ok      sitemap    https://www.nhl.com/sitemap/sitemap.xml  1183698  0.3
+ok      coaches    coaches:canadiens:hockey-operations      260083   1.2
+</code>
+
+Príklady obsahu stiahnutých stránok:
+  * ''players/8447400/bio/'' – text „About Wayne Gretzky: Every superlative has been used ... to describe the otherworldly talent of Wayne Gretzky ...“, výška, narodenie, draft
+  * ''players/8447400/stats/'' – tabuľka štatistík po sezónach (99 riadkov)
+  * ''coaches/canadiens/hockey-operations/'' – „Martin St-Louis, Head Coach; Derek Lalonde, Associate Coach; Stéphane Robidas, Assistant Coach ...“
+
+Stav dát (výstup ''stats.py'', 11. 10. 2026, po testovacích behoch, pred plným crawlom):
+<code>
+pages (latest versions): 33   all versions: 34
+  by type:   coaches=3, player=24, roster=2, sitemap=1, statlist=2, teams=1
+players: 8   complete (home+bio+stats): 8
+  (former)=1, canadiens=7
+coach pages: 3 from 3 teams
+raw HTML on disk: 7.7 MB
+</code>
+
+===== 6. Ďalší postup =====
+
+  - **Plný crawl:** ~27 000 stránok, ~6 GB, teda výrazne nad minimom 500 MB (samotné súčasné súpisky by dali iba ~500 MB).
+  - **Extrakcia (regex):** z uloženého HTML sa vyberie obsah ''<main>'', odstránia sa značky a podľa textových návestí (''Birthplace'', ''Born'', ''Draft'', ''Shoots'') a riadkov tabuliek sa vytiahnu údaje. Dokument = jeden hráč (spojené Home + Bio + Stats) alebo jedna stránka trénerov.
+  - **Vlastný indexer:** tokenizácia, malé písmená, odstránenie diakritiky (''Košice'' = ''Kosice''), invertovaný index uložený v súboroch (JSON/TSV), bez databázy.
+  - **Vyhľadávanie:** dve metriky, TF-IDF s kosínusovou podobnosťou a BM25.
+  - **Wikipédia:** spojenie hráčov podľa mena a dátumu narodenia, tímov podľa názvu (ocenenia, Stanley Cup, bývalí tréneri).
