@@ -11,7 +11,7 @@ ROBOTS_URL = BASE_URL + "/robots.txt"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 "
-    "VINF-NHL-crawler/0.1 (FIIT STU school project)"
+    "VINF-NHL-crawler/0.1"
 )
 ROBOTS_AGENT = "VINF-NHL-crawler"  # token matched against robots.txt groups
 EXTRA_HEADERS = {

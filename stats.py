@@ -4,11 +4,13 @@
 """
 import re
 from collections import Counter, defaultdict
+from datetime import datetime
 
 from crawler import config, storage
 from crawler.urls import PLAYER_SUBPAGES
 
 TARGET_MB = 500  # course minimum
+MAX_GAP_S = 600  # a longer pause between two log rows means the crawler was stopped
 TEAM_RE = re.compile(r"^https://www\.nhl\.com/([a-z]+)/player/")
 
 
@@ -53,9 +55,37 @@ def main():
         print(f"\ncoach pages: {sum(coaches.values())} from {len(coaches)} teams: "
               + ", ".join(f"{t}={n}" for t, n in sorted(coaches.items())))
 
-    size = sum((config.DATA_DIR / row["file"]).stat().st_size for row in rows)
-    mb = size / 1024 / 1024
+    sizes = defaultdict(list)  # page type -> file sizes of all versions
+    for row in rows:
+        sizes[row["page_type"]].append((config.DATA_DIR / row["file"]).stat().st_size)
+    print(f"\n  {'type':<10}{'files':>7}{'MB':>10}{'avg KB':>9}")
+    for t, s in sorted(sizes.items()):
+        print(f"  {t:<10}{len(s):>7}{sum(s) / 2**20:>10.1f}{sum(s) / len(s) / 1024:>9.0f}")
+    mb = sum(map(sum, sizes.values())) / 2**20
     print(f"\nraw HTML on disk: {mb:.1f} MB ({mb / TARGET_MB:.0%} of the {TARGET_MB} MB minimum)")
+    crawl_log_summary()
+
+
+def crawl_log_summary():
+    """Attempts by status and crawl time, from data/crawl_log.tsv."""
+    if not config.LOG_FILE.exists():
+        return
+    statuses, times = Counter(), []
+    with config.LOG_FILE.open(encoding="utf-8") as f:
+        header = f.readline().rstrip("\n").split("\t")
+        for line in f:
+            row = dict(zip(header, line.rstrip("\n").split("\t")))
+            statuses[row["status"]] += 1
+            if row["status"] != "cached":  # cached pages are read from disk, not downloaded
+                times.append(datetime.fromisoformat(row["timestamp"]))
+    print("\ncrawl attempts: " + ", ".join(f"{s}={n}" for s, n in statuses.most_common()))
+    if len(times) < 2:
+        return
+    # time actually crawling: gaps longer than MAX_GAP are breaks between runs
+    busy = sum((b - a).total_seconds() for a, b in zip(times, times[1:])
+               if (b - a).total_seconds() < MAX_GAP_S)
+    print(f"crawled from {times[0]:%Y-%m-%d %H:%M} to {times[-1]:%Y-%m-%d %H:%M}, "
+          f"{busy / 3600:.1f} h of crawling, {statuses['ok'] / max(busy / 3600, 1e-9):.0f} pages/h")
 
 
 if __name__ == "__main__":

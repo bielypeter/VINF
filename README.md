@@ -79,4 +79,35 @@ for a key is its current version. `status` is `ok`, or `partial` when the page's
 data never rendered (kept, and downloaded again on the next run).
 Load it with `crawler.storage.load_manifest()`.
 
-See `docs/konzultacia-2a.txt` for the consultation write-up (DokuWiki syntax).
+## Extract, index, search
+
+```
+.venv\Scripts\python extract.py                  # data/ -> out/extracted/{players,coaches,seasons}.tsv
+.venv\Scripts\python extract.py --show 8483515   # one player (id) or coach (part of the name)
+.venv\Scripts\python extract.py --check          # career totals vs. the all-time stats tables
+.venv\Scripts\python index.py                    # out/extracted -> out/index/{docs,postings,meta}.tsv
+.venv\Scripts\python search.py "slovak left wing"         # TF-IDF cosine and BM25 side by side
+.venv\Scripts\python evaluate.py                 # P@10, R@100, MAP on eval/queries.tsv
+```
+
+The extractor uses regex only and matches labels in the page text ("Born",
+"Draft") and table headers, never the generated CSS classes. Its output is TSV
+with one row per document: one player (Home + Bio + Stats merged) in
+`players.tsv`, one coach or hockey staff member in `coaches.tsv`; `seasons.tsv`
+holds the players' season rows. The index ranks with two idf variants: classic
+`log(N/df)` in TF-IDF cosine, probabilistic `log((N-df+0.5)/(df+0.5)+1)` in BM25.
+`out/` is rebuilt from `data/` on every run and is not committed.
+
+| File | Purpose |
+|---|---|
+| `extractor/text.py` | HTML -> text lines, labels, diacritics folding |
+| `extractor/tables.py` | generic regex table parser |
+| `extractor/player.py` | player fields, one named regex per field |
+| `extractor/coach.py` | coaches and hockey staff (name/role pairs, bios) |
+| `search/tokenize.py` | tokenizer shared by documents and queries |
+| `search/indexer.py` | build, save, load the inverted index |
+| `search/rank.py` | the two idf formulas, TF-IDF cosine, BM25 |
+| `eval/queries.tsv` | test queries; relevant documents defined as filters on the extracted fields |
+
+See `docs/konzultacia-2a.txt` (crawler) and `docs/konzultacia-2b.txt` (data,
+extractor, indexer, evaluation) for the consultation write-ups (DokuWiki syntax).

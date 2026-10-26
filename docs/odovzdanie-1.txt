@@ -1,0 +1,543 @@
+====== Odovzdanie 1. časti – NHL hráči a tréneri ======
+**Autor:** Peter Biely \\
+**Termín:** 28. 10. 2026 \\
+**Kód:** [[https://github.com/bielypeter/VINF|github.com/bielypeter/VINF]] \\
+**Stav dát:** 26. 10. 2026. Crawl ešte beží, čísla sa po jeho dokončení aktualizujú.
+
+===== 1. Opis projektu =====
+
+Cieľom je vyhľadávač nad hráčmi a trénermi NHL. Systém stiahne stránky hráčov a trénerov z [[https://www.nhl.com|nhl.com]] a regulárnymi výrazmi z nich vytiahne štruktúrované údaje:
+  * narodenie, národnosť, draft, pozíciu,
+  * tímy a štatistiky po sezónach,
+  * ocenenia a biografie,
+  * funkcie trénerov.
+Nad extrahovanými dokumentmi postaví vlastný invertovaný index.
+
+Dopyt v prirodzenom jazyku („slovenský útočník, ktorý vyhral Stanley Cup“) vráti zoradené dokumenty. Index používa dve metódy výpočtu idf a dve metriky: TF-IDF s kosínusovou podobnosťou a BM25.
+
+V 2. časti sa extrakcia spustí v Sparku a dáta sa spoja s Wikipédiou podľa mena a dátumu narodenia. Z Wikipédie pribudnú kluby mimo NHL, reprezentácia a ďalšie ocenenia.
+
+**Dokument** = jeden hráč (spojené stránky Home + Bio + Stats) alebo jedna osoba z trénerského štábu.
+
+===== 2. Scrapované stránky a extrahované dáta =====
+
+^ Zdroj ^ URL ^ Čo sa z neho berie ^
+| zoznam tímov | [[https://www.nhl.com/info/teams]] | odkazy na 32 tímov |
+| súpisky | ''https://www.nhl.com/<tím>/roster'', napr. [[https://www.nhl.com/canadiens/roster]] | odkazy na súčasných hráčov |
+| tabuľky všetkých hráčov | [[https://www.nhl.com/stats/skaters?reportType=allSeasons&seasonFrom=19171918&seasonTo=20262027&gameType=2&sort=points&page=0&pageSize=100|/stats/skaters]] (~80 strán), [[https://www.nhl.com/stats/goalies?reportType=allSeasons&seasonFrom=19171918&seasonTo=20262027&gameType=2&sort=wins&page=0&pageSize=100|/stats/goalies]] (~10 strán) | odkazy na bývalých hráčov (od 1917), kariérne súčty na kontrolu extraktora |
+| stránka hráča | [[https://www.nhl.com/canadiens/player/juraj-slafkovsky-8483515/bio|/<tím>/player/<meno>-<id>/{home,bio,stats}]] | hlavička, fakty z Bio, biografia, ocenenia, tabuľka sezón |
+| sitemap | [[https://www.nhl.com/sitemap/sitemap.xml]] | odkazy na stránky trénerov |
+| tréneri | napr. [[https://www.nhl.com/canadiens/team/hockey-operations]], [[https://www.nhl.com/bruins/team/hockey-ops/joe-sacco]] | meno, funkcia, sekcia, biografia |
+
+**5 ukážok extrahovaných dát** (''python extract.py --show <id alebo meno>''):
+
+1. Súčasný hráč, [[https://www.nhl.com/canadiens/player/juraj-slafkovsky-8483515/bio|Juraj Slafkovský]]:
+<code>
+doc_id player:8483515   name Juraj Slafkovský   #20 LW   active True   team canadiens
+height_in 75   weight_lb 225   shoots L   birth_date 2004-03-30
+birth Kosice, SVK   nationality Slovakia
+draft 2022, round 1, pick 1, overall 1, MTL, from TPS, FINLAND
+teams Montréal Canadiens   career GP 292, G 74, A 117, P 191
+about "Slafkovsky was selected by the Canadiens with the No. 1 pick in the 2022 NHL Draft. ..."
+</code>
+
+2. Bývalý hráč, Wayne Gretzky (''8447400''):
+<code>
+name Wayne Gretzky   #99 C   active False   birth 1961-01-26, Brantford, Ontario, CAN, Canada   undrafted True
+teams Edmonton Oilers ; Los Angeles Kings ; St. Louis Blues ; New York Rangers
+awards Stanley Cup (1984, 1985, 1987, 1988) ; Conn Smythe Trophy (1985, 1988) ; Hart Memorial Trophy (...) ; ...
+career GP 1487, G 894, A 1963, P 2857
+</code>
+
+3. Bývalý hráč, Marián Hossa (''8466148''):
+<code>
+name Marian Hossa   #81 RW   birth 1979-01-12, Stará Lubovna, SVK   nationality Slovakia
+draft 1997, round 1, pick 12, overall 12, OTT, from Dukla Trencin
+teams Ottawa Senators ; Atlanta Thrashers ; Pittsburgh Penguins ; Detroit Red Wings ; Chicago Blackhawks
+awards Stanley Cup (2010, 2013, 2015)   career GP 1309, G 525, A 609, P 1134
+seasons 20 riadkov, napr. 1997-98 Ottawa Senators GP 7 G 0 A 1 P 1 +/- -1 PIM 0
+</code>
+
+4. Brankár, Martin Brodeur (''8455710''). Tabuľka má iné stĺpce, kód je rovnaký:
+<code>
+name Martin Brodeur   #30 G   catches L   birth 1972-05-06, Montréal, Quebec, CAN, Canada
+draft 1990, round 1, pick 20, NJD, from St. Hyacinthe Lasers, QMJHL
+awards Stanley Cup (1995, 2000, 2003) ; Vezina Trophy (2002-03, 2003-04, 2006-07, 2007-08) ; Calder Memorial Trophy (1993-94) ; ...
+career GP 1266, W 691, GAA 2.24, SV% .912
+</code>
+
+5. Tréner, Joe Sacco (stránka jednej osoby):
+<code>
+doc_id coach:bruins:joe-sacco   name Joe Sacco   role Interim Head Coach   team bruins
+bio "Joe Sacco was named as the Interim Head Coach of the Boston Bruins on November 19, 2024. ..."
+url https://www.nhl.com/bruins/team/hockey-ops/joe-sacco
+</code>
+
+Výstup extraktora je TSV a každý riadok je jeden dokument (''out/extracted/''):
+  * ''players.tsv'': 3 887 hráčov, 35 stĺpcov,
+  * ''coaches.tsv'': 764 osôb,
+  * ''seasons.tsv'': 40 717 sezón hráčov; pomocná tabuľka na neskoršie spájanie.
+
+===== 3. Otázky a odpovede =====
+
+Systém dostane dopyt v prirodzenom jazyku a vráti zoradený zoznam dokumentov (hráčov alebo trénerov). Nižšie je ku každej otázke dopyt a **nezmenený výstup** ''python search.py "<dopyt>" -k 5''. Vľavo je TF-IDF s kosínusom, vpravo BM25. Číslo je skóre, ''p'' znamená hráč, ''c'' tréner. Pod výstupom je očakávaná odpoveď a čo systém skutočne vrátil.
+
+**1. Ktorí hráči sa narodili v Košiciach?**
+<code>
+> python search.py "born in kosice" -k 5
+query: 'born in kosice'   tokens: ['born', 'kosice']
+     TFIDF                                         BM25
+  1    0.535  Rastislav Stana            p          11.776  Rastislav Stana            p
+  2    0.345  Marek Svatos               p           9.621  Marek Svatos               p
+  3    0.310  Ladislav Nagy              p           9.423  Ladislav Nagy              p
+  4    0.300  Erik Cernak                p           8.562  Erik Cernak                p
+  5    0.150  Juraj Slafkovský           p           4.859  Juraj Slafkovský           p
+</code>
+Očakávané: Rastislav Staňa, Marek Svatoš, Erik Černák, Juraj Slafkovský. Obe metódy vrátia všetkých štyroch v top 5. Ladislav Nagy nie je z Košíc, ale do výsledkov sa dostal, lebo bol draftovaný z HC Košice.
+
+**2. Ktorí Slováci hrali na pravom krídle?**
+<code>
+> python search.py "slovakia right wing" -k 5
+query: 'slovakia right wing'   tokens: ['slovakia', 'right', 'wing']
+     TFIDF                                         BM25
+  1    0.354  Richard Zednik             p          12.197  Richard Zednik             p
+  2    0.348  Marian Stastny             p          11.747  Marian Stastny             p
+  3    0.336  Ladislav Nagy              p          11.006  Marek Svatos               p
+  4    0.303  Vladimir Orszagh           p          11.006  Juraj Kolnik               p
+  5    0.276  Michal Handzus             p          10.949  Branko Radivojevic         p
+</code>
+Očakávané: hráči s národnosťou Slovakia a pozíciou RW. BM25 vráti 5 z 5 (Zedník, Šťastný, Svatoš, Kolník, Radivojevič). TF-IDF vráti 2 z 5: Nagy a Oršagh sú ľavé krídla a Handzuš je center. Zhodujú sa iba v slovách //slovakia// a //wing//.
+
+**3. Ktorí brankári chytali za Edmonton Oilers?**
+<code>
+> python search.py "edmonton oilers goalie" -k 5
+query: 'edmonton oilers goalie'   tokens: ['edmonton', 'oilers', 'goalie']
+     TFIDF                                         BM25
+  1    0.401  Matthew Berlin             p           9.547  Matthew Berlin             p
+  2    0.296  Dave Dryden                p           9.031  Donald Cutts               p
+  3    0.293  Owen Michaels              p           8.990  Wayne Cowley               p
+  4    0.291  Jim Corsi                  p           8.990  Jim Corsi                  p
+  5    0.286  Wayne Cowley               p           8.939  Viktor Fasth               p
+</code>
+Očakávané: brankári, ktorí majú v tabuľke sezón Edmonton Oilers (66 hráčov). BM25 vráti 5 z 5. TF-IDF vráti 4 z 5: Owen Michaels je pravé krídlo a jeho krátky dokument má silnú zhodu na //edmonton oilers//.
+
+**4. Kto vyhral Conn Smythe Trophy?**
+<code>
+> python search.py "conn smythe trophy" -k 5
+query: 'conn smythe trophy'   tokens: ['conn', 'smythe', 'trophy']
+     TFIDF                                         BM25
+  1    0.383  Roger Crozier              p          16.007  Brian Leetch               p
+  2    0.320  Jean-Sebastien Giguere     p          15.487  Roger Crozier              p
+  3    0.311  Tim Thomas                 p          14.254  Tim Thomas                 p
+  4    0.292  Brian Leetch               p          14.123  Patrick Roy                p
+  5    0.283  Brad Richards              p          14.024  Butch Goring               p
+</code>
+Očakávané: držitelia trofeje pre najužitočnejšieho hráča play-off. Všetkých 7 rôznych hráčov v oboch stĺpcoch trofej vyhralo (pole ''awards'').
+
+**5. Kto sú tréneri brankárov v NHL?**
+<code>
+> python search.py "goaltending coach" -k 5
+query: 'goaltending coach'   tokens: ['goaltending', 'coach']
+     TFIDF                                         BM25
+  1    0.457  Michael Leighton           c          12.033  Jordan Sigalet             c
+  2    0.453  Matt Zaba                  c          10.909  Dan Stewart                c
+  3    0.450  Cam Ward                   c          10.742  Jason Labarbera            c
+  4    0.447  Peter Budaj                c          10.566  Kim Dillabaugh             c
+  5    0.442  Andy Chiodo                c          10.566  Michael Leighton           c
+</code>
+Očakávané: osoby s funkciou //goaltending coach//. Všetkých 10 výsledkov je relevantných. Prvé tri miesta v BM25 majú tréneri s biografiou (Sigalet, Stewart, Labarbera), v ktorej sa //goaltending// a //coach// opakujú. TF-IDF uprednostní krátke dokumenty bez biografie.
+
+**6. Kto je hlavný tréner Montreal Canadiens?**
+<code>
+> python search.py "montreal canadiens head coach" -k 5
+query: 'montreal canadiens head coach'   tokens: ['montreal', 'canadiens', 'head', 'coach']
+     TFIDF                                         BM25
+  1    0.521  Martin St-Louis            c          13.872  Pascal Vincent             c
+  2    0.407  Mike Babcock               c          12.781  Martin St-Louis            c
+  3    0.406  Jeff Murray                c          10.497  Ryan Huska                 c
+  4    0.381  Rick Tocchet               c          10.452  Cail MacLean               c
+  5    0.358  Robert Campbell            c          10.277  Davis Payne                c
+</code>
+Očakávané: **Martin St-Louis**. TF-IDF ho má na 1. mieste. Ďalej sú hlavní tréneri iných tímov. BM25 ho má na 2. mieste: pred ním je Pascal Vincent, asistent v Seattli, ktorého biografia spomína Laval Rocket, farmu Canadiens. Ďalej BM25 vracia trénerov s dlhou biografiou.
+
+**7. Ktorí Slováci vyhrali Stanley Cup?**
+<code>
+> python search.py "slovakia stanley cup" -k 5
+query: 'slovakia stanley cup'   tokens: ['slovakia', 'stanley', 'cup']
+     TFIDF                                         BM25
+  1    0.340  Ladislav Nagy              p          10.469  Michal Handzus             p
+  2    0.327  Richard Zednik             p           9.313  Tomas Kopecky              p
+  3    0.312  Michal Handzus             p           9.285  Erik Cernak                p
+  4    0.307  Vladimir Orszagh           p           9.126  Miroslav Satan             p
+  5    0.294  Marian Stastny             p           8.340  Tomas Tatar                p
+</code>
+Očakávané: Hossa, Chára, Šatan, Handzuš, Gáborík, Kopecký, Černák, Mikita (podľa poľa ''awards''). BM25 vráti v top 5 štyroch z nich (Handzuš, Kopecký, Černák, Šatan). TF-IDF vráti iba Handzuša. Nagy, Zedník, Oršagh a Šťastný slová //stanley// ani //cup// vôbec neobsahujú. Ich dokumenty majú iba 18–34 tokenov a kosínus im za samotné //slovakia// dá vysoké skóre. Hossa (558 tokenov, //stanley// 8×) a Chára (413 tokenov) majú dokumenty 4–5× dlhšie ako priemer (111). Normalizácia dĺžky ich posunie nižšie: Hossa je 12. v BM25 a 38. v TF-IDF.
+
+**8. Kto je Wayne Gretzky?**
+<code>
+> python search.py "wayne gretzky" -k 5
+query: 'wayne gretzky'   tokens: ['wayne', 'gretzky']
+     TFIDF                                         BM25
+  1    0.298  Wayne Thomas               p          10.812  Denis Savard               p
+  2    0.248  Wayne Cowley               p          10.306  Wayne Gretzky              p
+  3    0.235  Wayne Rutledge             p           7.446  Bernie Nicholls            p
+  4    0.232  Wayne Cashman              p           7.326  Gordie Howe                p
+  5    0.220  Wayne Stephenson           p           6.743  Keith Gretzky              c
+</code>
+Očakávané: **Wayne Gretzky** na 1. mieste. Toto zatiaľ nefunguje: BM25 ho má na 2. mieste a TF-IDF ho v top 5 nemá. V jeho dokumente (159 tokenov) je //wayne// 2× a //gretzky// 2×. Vektor dokumentu je dlhý, lebo obsahuje veľa zriedkavých termov z ocenení a tímov, a kosínus ho tým vydelí. Wayne Thomas má iba 21 tokenov, takže mu na 1. miesto v TF-IDF stačí samotné //wayne//. Biografia Denisa Savarda spomína Gretzkého 2× v kratšom dokumente (86 tokenov), preto je v BM25 pred ním. Riešenie pre ďalšiu časť: vyššia váha poľa ''name'', napr. zopakovať meno v texte dokumentu alebo pridať bonus za zhodu s menom.
+
+===== 4. Frameworky a knižnice =====
+
+^ Časť ^ Nástroj ^ Prečo ^
+| Jazyk | Python 3.13 | |
+| Renderovanie stránok | **Playwright 1.63** (headless Chromium) | nhl.com posiela iba prázdnu HTML kostru, dáta hráča dopĺňa JavaScript. Bez renderovania je napr. „Kosice“ v HTML stránky Bio 0-krát. Je to jediná externá knižnica (''requirements.txt''). |
+| Statické stránky (sitemap, tréneri) | ''urllib'' (štandardná knižnica) | obsah je priamo v HTML, renderovanie by bolo zbytočne pomalé |
+| Crawler (fronta, robots.txt, pauzy, ukladanie) | vlastná implementácia | bez Scrapy, aby bolo všetko pod kontrolou: pokračovanie po prerušení, deduplikácia podľa ID hráča, ukladanie bez prepisovania |
+| Extrakcia odkazov a entít | ''re'' (regulárne výrazy) | požiadavka predmetu; bez BeautifulSoup, lxml a XPath |
+| Výstup, index | ''csv'' (TSV), ''unicodedata'' (diakritika), ''math'' | bez databázy, index je v TSV súboroch a načíta sa do pamäte |
+| 2. časť | Apache Spark (PySpark) | extrakčné funkcie dostanú HTML reťazec a vrátia slovník, bez práce so súbormi, takže pôjdu priamo do ''map'' |
+
+===== 5. Architektúra =====
+
+<code>
+                 +---------------------------+
+  seed URL ----> |  Frontier (FIFO fronta +  | <--- data/frontier.json (pokračovanie po prerušení)
+  /info/teams    |  množina navštívených URL)|
+  /stats/skaters |  kľúč: player:<id>:<sub>  |
+  /stats/goalies +-------------+-------------+
+  sitemap.xml                  | ďalšia URL
+                               v
+                 +---------------------------+
+                 |  robots.txt kontrola      |  vlastný parser (* a $, Crawl-delay)
+                 +-------------+-------------+
+                               v
+                 +---------------------------+       api-web.nhle.com
+                 |  Fetcher                  | <---> (stránka si sama načíta dáta)
+                 |  Playwright / urllib      |
+                 |  blokuje reklamy, obrázky |
+                 |  čaká na vykreslenie dát  |
+                 +------+-------------+------+
+                        |             | timeout / 429 / 5xx -> opakovanie max 3x (10/20/40 s)
+                        v
+     +------------------+------------------+
+     v                                     v
++------------------------+   +----------------------------------+
+| Úložisko (append-only) |   | Extrakcia odkazov (regex)        |
+| data/raw/.../<čas>.html|   | teams -> roster -> hráč          |
+| data/manifest.tsv      |   | stats tabuľka -> hráč, ďalšia str.|
+| data/crawl_log.tsv     |   | sitemap -> tréneri               |
++-----------+------------+   +----------------+-----------------+
+            |                                 +----> nové URL späť do Frontier
+            |                                        pauza 2–4 s medzi stránkami
+            v
++------------------------+     +------------------------+     +---------------------------+
+| extract.py (regex)     | --> | index.py               | --> | search.py                 |
+| HTML -> riadky textu,  |     | tokenizácia, TF,       |     | TF-IDF kosínus | BM25     |
+| návestia, tabuľky      |     | invertovaný index      |     | evaluate.py: P@10, MAP    |
+| out/extracted/*.tsv    |     | out/index/*.tsv        |     |                           |
++------------------------+     +------------------------+     +---------------------------+
+</code>
+
+  * **Súčasní hráči:** ''/info/teams'' -> 32 súpisiek -> hráč (Home, Bio, Stats).
+  * **Bývalí hráči:** tabuľky všetkých hráčov od 1917 (~8 900 hráčov). Tlačidlo „ďalšia strana“ nie je odkaz, preto crawler URL ďalšej strany vytvorí sám, kým je strana plná.
+  * **Tréneri:** ''sitemap.xml'' -> stránky štábov 25 tímov (URL sa líšia podľa tímu).
+  * **Deduplikácia:** hráča identifikuje dvojica (ID, podstránka). Rovnaká stránka sa nestiahne dvakrát, ani keď na ňu vedie viac URL: krátka ''/player/<id>'', URL s ''ý'' aj s ''%C3%BD'', URL starého tímu po prestupe.
+  * **Ukladanie:** nič sa neprepisuje ani nemaže. Opätovné stiahnutie uloží novú verziu vedľa starej. ''data/'' sa po stiahnutí už nemení; ''out/'' sa pri každom spustení vytvorí znova.
+
+===== 6. Metadáta ukladané pri crawlovaní =====
+
+**''data/manifest.tsv''** má 1 riadok na každú uloženú stránku a slúži na načítanie dát extraktorom. Ukážka:
+^ ts ^ key ^ page_type ^ status ^ url ^ final_url ^ http_status ^ bytes ^ sha1 ^ render_s ^ file ^
+| 2026-10-25T22-12-09 | player:8483515:bio | player | ok | %%https://www.nhl.com/player/juraj-slafkovský-8483515/bio%% | %%https://www.nhl.com/canadiens/player/juraj-slafkovský-8483515/bio%% | 200 | 168661 | ea9226ed…c8bd | 6.7 | raw/players/8483515/bio/2026-10-25T22-12-09.html |
+| 2026-10-25T17-53-09 | player:8483515:stats | player | ok | %%https://www.nhl.com/player/8483515%% | %%https://www.nhl.com/canadiens/player/juraj-slafkovský-8483515/stats%% | 200 | 198665 | 98289f2d…92ce | 2.5 | raw/players/8483515/stats/2026-10-25T17-53-09.html |
+| 2026-10-11T22-11-56 | statlist:skaters:0 | statlist | ok | %%https://www.nhl.com/stats/skaters?…&page=0&pageSize=100%% | (rovnaká) | 200 | 300343 | f4a0549d…992ce | 3.1 | raw/statlists/skaters/page-000/2026-10-11T22-11-56.html |
+| 2026-10-11T22-11-48 | coaches:canadiens:hockey-operations | coaches | ok | %%https://www.nhl.com/canadiens/team/hockey-operations%% | (rovnaká) | 200 | 260097 | 2d8d2548…54f1 | 1.2 | raw/coaches/canadiens/hockey-operations/2026-10-11T22-11-48.html |
+
+^ Stĺpec ^ Prečo ^
+| ''ts'' | čas stiahnutia; zároveň názov súboru, takže verzie sa neprepíšu |
+| ''key'' | identita stránky; posledný riadok pre ''key'' je aktuálna verzia |
+| ''page_type'' | podľa typu sa vyberá extraktor (hráč, tréneri, tabuľka) |
+| ''status'' | ''ok'' alebo ''partial'' (dáta sa nevykreslili, stránka sa pri ďalšom behu stiahne znova) |
+| ''url'', ''final_url'' | po presmerovaní: ''/player/8483515'' -> URL s tímom. Zo ''final_url'' sa berie súčasný tím hráča. |
+| ''http_status'', ''bytes'', ''render_s'' | kontrola a štatistika |
+| ''sha1'' | odtlačok obsahu; podľa neho sa dá zistiť, či sa nová verzia stránky zmenila |
+| ''file'' | cesta k HTML |
+
+**''data/crawl_log.tsv''** má 1 riadok na každý pokus. Stĺpce: ''timestamp, status, page_type, key, url, final_url, bytes, render_s, file, error''. Stav je ''ok'', ''partial'', ''failed'', ''retry'', ''cached'' alebo ''robots''. Z tohto súboru sa počíta čas crawlu a počet opakovaní.
+
+**''data/frontier.json''** obsahuje frontu a navštívené URL, aby sa po Ctrl+C dalo pokračovať.
+
+===== 7. Hlavičky, timeouty, pauzy =====
+
+Nastavenia sú v [[https://github.com/bielypeter/VINF/blob/main/crawler/config.py|crawler/config.py]].
+
+^ Nastavenie ^ Hodnota ^ Prečo ^
+| User-Agent | ''Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 VINF-NHL-crawler/0.1'' | Bežný UA prehliadača: stránka pre neznámych botov vracia inú alebo zablokovanú stránku. Token ''VINF-NHL-crawler'' crawler identifikuje a podľa neho sa vyhodnocuje robots.txt. |
+| Accept-Language | ''en-US,en;q=0.9'' | Extraktor hľadá anglické návestia (''Born'', ''Birthplace'', ''Draft''), takže stránky musia byť vždy v angličtine. |
+| Accept (urllib) | ''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'' | ako prehliadač; pri renderovaní posiela ostatné hlavičky Chromium |
+| Pauza medzi stránkami | náhodne 2–4 s (alebo Crawl-delay z robots.txt, ak je väčší) | Spolu s renderovaním (3–8 s) je to najviac ~1 stránka za 5–10 s, čo server nezaťaží. Náhodnosť zabráni pravidelnému vzoru požiadaviek. Stránky, ktoré už sú na disku, sa čítajú z disku bez pauzy. |
+| Timeout načítania | 30 s | Bežná stránka sa vykreslí za 3–8 s. 30 s pokryje pomalé odpovede a nečaká sa zbytočne dlho na zaseknutú stránku. |
+| Timeout na vykreslenie dát | 20 s | Čaká sa na prvok, ktorý vznikne až po načítaní dát: ''text=Birthplace'' (Bio), ''main table'' (Stats), odkaz na hráča (súpiska, tabuľka). Ak sa neobjaví, stránka sa uloží ako ''partial'' a stiahne sa znova. |
+| Opakovanie | max. 3-krát, 10 / 20 / 40 s, rešpektuje ''Retry-After'' pri 429 | Exponenciálne čakanie, ak je server preťažený. Doteraz boli 4 opakovania (timeout) a všetky uspeli; 429 neprišlo ani raz. |
+| Blokované požiadavky | obrázky, video, fonty, všetko mimo nhl.com / nhle.com | Šetrí server aj čas; reklamy a trackery nie sú potrebné. |
+| robots.txt | dodržiavaný | nhl.com zakazuje iba ''/js/'', ''/css/'', ''/search'', ''/_*'' a pod. |
+
+===== 8. Kód: extrakcia URL z HTML =====
+
+[[https://github.com/bielypeter/VINF/blob/main/crawler/urls.py#L125-L157|crawler/urls.py, extract_links()]]. Regex vyberie všetky ''href'', URL sa normalizuje a podľa regexov typov stránok ([[https://github.com/bielypeter/VINF/blob/main/crawler/urls.py#L8-L38|urls.py#L8-L38]]) sa ponechá iba to, čo crawler potrebuje.
+
+<code python>
+HREF_RE = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)""", re.I)
+# Team sites are linked as absolute https://www.nhl.com/<slug> on the teams page;
+# language editions (/fr, /sk, ...) are 2 letters, so {3,} skips them.
+TEAM_LINK_RE = re.compile(r"""href=["']https://www\.nhl\.com/([a-z]{3,})/?["']""")
+LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
+PLAYER_RE = re.compile(
+    r"^https://www\.nhl\.com/(?:([a-z]+)/)?player/([^/]+)-(\d+)(?:/(home|bio|stats))?/?$"
+)
+
+
+def extract_links(page_html, page_url, page_type):
+    """In-scope links worth following from a page."""
+    if page_type == "teams":
+        slugs = sorted(set(TEAM_LINK_RE.findall(page_html)) - NOT_TEAMS)
+        return [f"{BASE_URL}/{slug}/roster" for slug in slugs]
+    if page_type == "sitemap":
+        locs = (normalize(loc) for loc in LOC_RE.findall(page_html))
+        return [url for url in locs if url and classify(url)[0] == "coaches"]
+
+    links = []
+    for href in HREF_RE.findall(page_html):
+        url = normalize(href, page_url)
+        if url is None:
+            continue
+        link_type, info = classify(url)
+        if link_type == "player":
+            links.append(url)
+            # From a full player URL we know the other two subpages too.
+            if info["slug"]:
+                team = f"/{info['team']}" if info["team"] else ""
+                stem = f"{BASE_URL}{team}/player/{info['slug']}-{info['id']}"
+                links.extend(f"{stem}/{sub}" for sub in PLAYER_SUBPAGES)
+        elif link_type in ("roster", "coaches"):
+            links.append(url)
+
+    if page_type == "statlist":
+        # The "next page" control is a button, not a link: a full page means
+        # there is probably another one.
+        info = classify(page_url)[1]
+        players = {classify(link)[1]["id"] for link in links if classify(link)[0] == "player"}
+        if len(players) >= STATLIST_PAGE_SIZE:
+            links.append(statlist_url(info["kind"], info["page"] + 1))
+    return links
+</code>
+
+===== 9. Kód: extrakcia entít z HTML =====
+
+CSS triedy na nhl.com sú generované hashe (''sc-gvLdPU''), ktoré sa pri každom nasadení menia. Extraktor ich preto nepoužíva. Postup:
+  - HTML sa zmení na riadky textu ([[https://github.com/bielypeter/VINF/blob/main/extractor/text.py#L38-L52|extractor/text.py]]).
+  - Hodnoty sa hľadajú podľa **návestia** v texte: za riadkom ''Born'' nasleduje dátum.
+  - Tabuľky sa čítajú podľa **hlavičky** stĺpcov ([[https://github.com/bielypeter/VINF/blob/main/extractor/tables.py|extractor/tables.py]]).
+
+<code python>
+# extractor/text.py
+DROP_RE = re.compile(r"<(script|style|noscript|svg|template)\b.*?</\1\s*>|<!--.*?-->", re.S | re.I)
+# Tags that do not break a line: "Josh<span>&nbsp;</span>Anderson" stays one line.
+INLINE_RE = re.compile(r"</?(?:a|span|b|i|em|strong|small|sup|sub|abbr|img|label|u)\b[^>]*>", re.I)
+TAG_RE = re.compile(r"<[^>]+>")
+
+
+def html_to_lines(fragment):
+    """Visible text, one line per block element, without empty lines."""
+    text = INLINE_RE.sub("", DROP_RE.sub("\n", fragment))
+    text = html.unescape(TAG_RE.sub("\n", text))
+    lines = (SPACE_RE.sub(" ", line).strip() for line in text.split("\n"))
+    return [line for line in lines if line]
+
+
+def value_after(lines, label_re, start=0, end=None):
+    """The line after the first line matching label_re (a compiled regex)."""
+    end = len(lines) if end is None else end
+    for i in range(start, min(end, len(lines) - 1)):
+        if label_re.fullmatch(lines[i]):
+            return lines[i + 1]
+    return None
+</code>
+
+[[https://github.com/bielypeter/VINF/blob/main/extractor/player.py#L24-L36|extractor/player.py, regexy]] a [[https://github.com/bielypeter/VINF/blob/main/extractor/player.py#L93-L126|parse_facts()]]:
+<code python>
+BORN_LABEL = re.compile(r"Born")
+BORN_RE = re.compile(r"(?P<mon>[A-Z][a-z]{2}) (?P<day>\d{1,2}), (?P<year>\d{4})")
+BIRTHPLACE_LABEL = re.compile(r"Birthplace(?: • Nationality)?")
+# "Kosice, SVK • Slovakia", "Brantford, Ontario, CAN • Canada"
+BIRTHPLACE_RE = re.compile(
+    r"(?P<city>[^,•]+?)(?:, (?P<region>[^,•]+?))?, (?P<country>[A-Z]{3})(?: • (?P<nationality>.+))?")
+DRAFT_LABEL = re.compile(r"Draft")
+# "2022 - Round 1, Pick 1 • MTL" or "Undrafted"
+DRAFT_RE = re.compile(
+    r"(?P<year>\d{4}) - Round (?P<round>\d+), Pick (?P<pick>\d+)(?: • (?P<team>[A-Z]{2,3}))?")
+UNDRAFTED_RE = re.compile(r"Undrafted")
+# "Drafted from TPS, FINLAND (1st overall)"
+DRAFTED_FROM_RE = re.compile(r"Drafted from (?P<club>.+?)(?: \((?P<overall>\d+)(?:st|nd|rd|th) overall\))?")
+
+
+def parse_facts(lines):
+    rec = {}
+    m = HEIGHT_RE.fullmatch(value_after(lines, HEIGHT_LABEL) or "")
+    rec["height_in"] = int(m.group(1)) * 12 + int(m.group(2)) if m else None
+    m = WEIGHT_RE.fullmatch(value_after(lines, WEIGHT_LABEL) or "")
+    rec["weight_lb"] = int(m.group(1)) if m else None
+    m = HAND_RE.fullmatch(value_after(lines, HAND_LABEL) or "")
+    rec["shoots"] = m.group(0) if m else None
+
+    m = BORN_RE.match(value_after(lines, BORN_LABEL) or "")
+    rec["birth_date"] = (f"{m['year']}-{MONTHS[m['mon']]:02d}-{int(m['day']):02d}"
+                         if m and m["mon"] in MONTHS else None)
+    m = BIRTHPLACE_RE.fullmatch(value_after(lines, BIRTHPLACE_LABEL) or "")
+    for field in ("city", "region", "country"):
+        rec[f"birth_{field}"] = m[field] if m else None
+    rec["nationality"] = m["nationality"].strip() if m and m["nationality"] else None
+
+    rec.update(draft_year=None, draft_round=None, draft_pick=None, draft_overall=None,
+               draft_team=None, draft_from=None, undrafted=None)
+    i = index_of(lines, DRAFT_LABEL)
+    if 0 <= i < len(lines) - 1:
+        value = lines[i + 1]
+        m = DRAFT_RE.fullmatch(value)
+        if m:
+            rec.update(draft_year=int(m["year"]), draft_round=int(m["round"]),
+                       draft_pick=int(m["pick"]), draft_team=m["team"], undrafted=False)
+            if i + 2 < len(lines):
+                f = DRAFTED_FROM_RE.fullmatch(lines[i + 2])
+                if f:
+                    rec["draft_from"] = f["club"]
+                    rec["draft_overall"] = number(f["overall"])
+        elif UNDRAFTED_RE.fullmatch(value):
+            rec["undrafted"] = True
+    return rec
+</code>
+
+Ďalšie polia (meno z ''<title>'', ocenenia, biografia, tabuľka sezón) a tréneri sú opísaní v [[konzultacia-2b|Konzultácii 2b]], kapitola 2. Tréneri sú v [[https://github.com/bielypeter/VINF/blob/main/extractor/coach.py|extractor/coach.py]].
+
+**Úplnosť a správnosť extrakcie** (3 887 hráčov):
+  * meno, narodenie, miesto narodenia a národnosť sú vyplnené na 100 %, výška a váha na 99,9 %.
+  * Draft je vyplnený na 70,4 % a ďalších 13,5 % je ''Undrafted''. Zvyšok sú hráči narodení pred 1945; draft NHL existuje od 1963.
+  * ''extract.py --check'' porovná kariérne súčty zo stránky hráča s riadkom v tabuľke všetkých hráčov, čo je iná stránka NHL. Zhoda je pri **3 014 z 3 015** bývalých hráčov. Jediný rozdiel (1 zápas) je nezhoda medzi dvoma stránkami NHL, nie chyba extraktora.
+
+===== 10. Indexer a index (TF) =====
+
+Kód: [[https://github.com/bielypeter/VINF/blob/main/search/indexer.py|search/indexer.py]], [[https://github.com/bielypeter/VINF/blob/main/search/tokenize.py|search/tokenize.py]]. Spúšťanie: ''python index.py''.
+
+  * **Vstup:** ''players.tsv'' a ''coaches.tsv''. Každý riadok je jeden dokument.
+  * **Text hráča:** meno, pozícia (aj slovom: ''LW'' -> //left wing winger//), tímy, rok a miesto narodenia, národnosť, draft (//drafted 2022 round 1 pick 1 overall 1 MTL from TPS//), ocenenia a biografia. Čísla zo štatistík sa neindexujú.
+  * **Text trénera:** meno, funkcia, tím, sekcia, biografia.
+  * **Tokenizácia:** malé písmená, odstránenie diakritiky (''Košice'' = ''kosice''), tokeny ''[a-z0-9]+'', krátky zoznam anglických stop slov, bez stemmingu. Dopyt sa tokenizuje rovnako.
+  * **Index:** invertovaný. Pre každý term sa ukladá ''df'' a zoznam ''(dokument, tf)'', kde tf je surová početnosť termu v dokumente. Váhy (idf, tf-váha) sa počítajú až pri dopyte, takže ten istý index slúži obom metódam. Pri zostavení sa predpočíta iba dĺžka vektora dokumentu ''|d|'' pre kosínus.
+<code>
+out/index/docs.tsv      doc  doc_id          type    name        length  norm
+                        0    player:8444857  player  Sid Abel    97      52.739887
+out/index/postings.tsv  term     df   postings (doc:tf,...)
+                        kosice   6    160:1,2233:1,2289:2,2449:1,3261:3,3767:2
+out/index/meta.tsv      documents 4651, terms 14529, avgdl 110.95, built, sources
+</code>
+  * **Koľkokrát sa vytvára:** jedným prechodom cez všetky dokumenty, celý naraz. Inkrementálne sa neaktualizuje: po každom behu ''extract.py'' sa vytvorí znova (0,6 s). Pri vyhľadávaní sa raz načíta zo súborov do pamäte (bez databázy) a potom slúži všetkým dopytom.
+  * **Veľkosť:** 4 651 dokumentov (3 887 hráčov, 764 trénerov), 14 529 termov, 346 011 položiek, priemerne 111 tokenov na dokument.
+
+===== 11. Metódy výpočtu idf =====
+
+Kód: [[https://github.com/bielypeter/VINF/blob/main/search/rank.py|search/rank.py]]. ''N'' je počet dokumentov, ''df'' počet dokumentov s termom.
+
+^ ^ Klasické idf ^ Pravdepodobnostné idf (Robertson–Spärck Jones) ^
+| vzorec | ''idf = log(N / df)'' | ''idf = log((N - df + 0,5) / (df + 0,5) + 1)'' |
+| použité v | **TF-IDF + kosínusová podobnosť**: ''w = (1 + log tf) · idf'' pre dokument aj dopyt, skóre ''Σ w_q · w_d / (|q| · |d|)'' | **BM25**: ''Σ idf · tf · (k1 + 1) / (tf + k1 · (1 - b + b · dl / avgdl))'', ''k1 = 1,2'', ''b = 0,75'' |
+| term vo všetkých dokumentoch | idf = 0 | idf ≈ 0 (bez ''+1'' by bol záporný) |
+
+**Hodnoty idf pre termy z indexu** (N = 4 651):
+^ term ^ df ^ log(N/df) ^ log((N-df+0,5)/(df+0,5)) bez +1 ^ log((N-df+0,5)/(df+0,5)+1) ^
+| born | 3 899 | 0,176 | **-1,645** | 0,176 |
+| former | 3 063 | 0,418 | **-0,657** | 0,418 |
+| drafted | 2 768 | 0,519 | **-0,385** | 0,519 |
+| stanley | 1 524 | 1,116 | 0,719 | 1,116 |
+| goalie | 963 | 1,575 | 1,342 | 1,574 |
+| calder | 296 | 2,754 | 2,687 | 2,753 |
+| kosice | 6 | 6,653 | 6,572 | 6,573 |
+
+  * Pôvodné pravdepodobnostné idf (stredný stĺpec) dáva termom, ktoré sú vo viac ako polovici dokumentov, **zápornú váhu**. Dokument by tak bol penalizovaný za to, že obsahuje slovo z dopytu (napr. //born//). Preto sa v BM25 používa variant s ''+1''.
+  * Tento variant sa dá upraviť na ''log((N + 1) / (df + 0,5))''. Prakticky sa teda rovná klasickému idf a v tabuľke sa obe líšia až na treťom desatinnom mieste. Rozdiel je iba pri veľmi zriedkavých termoch (''kosice'': 6,653 oproti 6,573).
+  * Rozdiel vo výsledkoch oboch metód preto nespôsobuje samotné idf, ale to, ako sa idf kombinuje s tf:
+    * TF-IDF používa ''1 + log tf'' a kosínus. Kosínus normalizuje dĺžku dokumentu celým vektorom, takže krátky dokument s jedným silným termom má vysoké skóre.
+    * BM25 tf saturuje (''k1'') a dĺžku normalizuje voči priemeru (''b''). Viac odmení dokument, ktorý obsahuje všetky termy dopytu.
+
+===== 12. Porovnanie metód na dopytoch =====
+
+''python search.py "<dopyt>" -k 5''. ✓ = relevantný podľa extrahovaných polí, ✗ = nerelevantný.
+
+**Dopyt 1: ''finland right wing''** (relevantné: ''nationality=Finland & position=RW'')
+^ # ^ TF-IDF (klasické idf) ^ skóre ^ ^ BM25 (pravdepodobnostné idf) ^ skóre ^ ^
+| 1 | Sami Kapanen | 0,325 | ✓ | Jani Nyman | 10,607 | ✓ |
+| 2 | Mikko Makela | 0,313 | ✓ | Antti Miettinen | 10,477 | ✓ |
+| 3 | Jani Nyman | 0,299 | ✓ | Sami Kapanen | 10,435 | ✓ |
+| 4 | Sean Bergenheim (LW) | 0,296 | ✗ | Mikko Makela | 10,268 | ✓ |
+| 5 | Rasmus Ristolainen (D) | 0,294 | ✗ | Arttu Hyry | 10,180 | ✓ |
+TF-IDF pustí do výsledkov Fínov, ktorí nie sú pravé krídla: krátke dokumenty so silným termom //finland// a zhodou iba na //wing//. BM25 odmení dokumenty, ktoré majú všetky tri termy.
+
+**Dopyt 2: ''edmonton oilers goalie''** (relevantné: ''teams~Edmonton Oilers & position=G'')
+^ # ^ TF-IDF ^ skóre ^ ^ BM25 ^ skóre ^ ^
+| 1 | Matthew Berlin | 0,401 | ✓ | Matthew Berlin | 9,547 | ✓ |
+| 2 | Dave Dryden | 0,296 | ✓ | Donald Cutts | 9,031 | ✓ |
+| 3 | Owen Michaels (RW) | 0,293 | ✗ | Wayne Cowley | 8,990 | ✓ |
+| 4 | Jim Corsi | 0,291 | ✓ | Jim Corsi | 8,990 | ✓ |
+| 5 | Wayne Cowley | 0,286 | ✓ | Viktor Fasth | 8,939 | ✓ |
+Owen Michaels hral iba za Edmonton. Jeho krátky dokument má //edmonton oilers// a kosínus ho dá vysoko, hoci //goalie// v ňom chýba.
+
+**Dopyt 3: ''calder trophy rookie of the year''** (relevantné: ''awards~Calder'')
+^ # ^ TF-IDF ^ skóre ^ ^ BM25 ^ skóre ^ ^
+| 1 | Jack Gelineau | 0,201 | ✓ | Matt Read | 9,666 | ✗ |
+| 2 | Camille Henry | 0,194 | ✓ | Lane Hutson | 9,036 | ✓ |
+| 3 | Roger Crozier | 0,192 | ✓ | Moritz Seider | 8,885 | ✓ |
+| 4 | Frank McCool | 0,191 | ✓ | Steve Mason | 8,772 | ✓ |
+| 5 | Larry Regan | 0,188 | ✓ | Matty Beniers | 8,508 | ✓ |
+Tu je lepší TF-IDF. Matt Read Calderovu trofej nevyhral, ale jeho biografia opakovane spomína //rookie// a //year//. BM25 tieto termy sčíta a prvý výsledok je nerelevantný.
+
+**Dopyt 4: ''košice''** (tokeny: ''kosice'', rovnaký výsledok ako pre ''kosice''). Oba rebríčky majú rovnaké poradie: Rastislav Stana, Marek Svatoš, Ladislav Nagy, Erik Černák, Juraj Slafkovský. Pri jednom terme rozhoduje iba tf a dĺžka dokumentu, idf je pre všetky dokumenty rovnaké.
+
+**Vyhodnotenie na 18 dopytoch** (''python evaluate.py''). Relevantné dokumenty určuje filter nad extrahovanými poľami (''eval/queries.tsv''). Celá tabuľka je v [[konzultacia-2b|Konzultácii 2b]], kapitola 4.
+^ Metóda ^ P@10 ^ R@100 ^ MAP ^
+| TF-IDF + kosínus (klasické idf) | 0,73 | 0,80 | 0,62 |
+| BM25 (pravdepodobnostné idf) | **0,78** | **0,86** | **0,74** |
+BM25 je lepší najmä pri dopytoch, ktoré kombinujú dve vlastnosti (krajina + pozícia, tím + pozícia). Obe metódy zlyhávajú pri nezhode slovníka. Pri ''first overall draft pick'' je v dokumente „overall 1“. Pri ''drafted by tampa bay lightning'' je v dokumente skratka ''TBL''.
+
+===== 13. Štatistika stiahnutých dokumentov =====
+
+Výstup ''python stats.py'' k 26. 10. 2026. Crawl ešte beží: súpisky a tréneri sú kompletní, bývalí hráči sú na strane 27 z ~80 tabuľky ''/stats/skaters''.
+
+^ Typ stránky ^ Počet ^ Veľkosť (MB) ^ Priemer (KB) ^ Relevantné pre projekt ^
+| hráč (Home, Bio, Stats) | 11 660 | 1 668,3 | 147 | **všetky**; 3 887 hráčov, z toho 3 886 má všetky 3 podstránky, spolu 3 887 dokumentov |
+| tréneri | 93 | 11,4 | 124 | **92** stránok s hokejovým personálom; 764 dokumentov (z 1 749 osôb, zvyšok je obchodný personál) |
+| tabuľky všetkých hráčov | 37 | 10,5 | 289 | pomocné: odkazy na hráčov a kontrola extraktora, nie sú dokumentom |
+| súpisky | 32 | 5,0 | 160 | iba navigácia |
+| zoznam tímov, sitemap | 2 | 1,4 | – | iba navigácia |
+| **spolu** | **11 824** | **1 696,5** | 147 | **11 752 stránok (99,4 %) je zdrojom dokumentov** |
+
+  * Na disku je 1 696,5 MB HTML, čo je 339 % z minima 500 MB. Po dokončení crawlu (~27 000 stránok) to bude približne 4 GB.
+  * Pokusy: 11 826 ''ok'', 54 ''cached'' (načítané z disku), 4 ''retry'' (timeout, všetky napokon uspeli), 0 ''failed''.
+  * Čas: 20,0 h čistého crawlovania (11. – 26. 10.), 593 stránok za hodinu.
+  * Extrahované: 3 887 hráčov, 764 trénerov a personálu, 40 717 sezón; spolu **4 651 dokumentov**.
+
+===== 14. ZIP s kódom =====
+
+Kód: [[https://github.com/bielypeter/VINF|github.com/bielypeter/VINF]], príloha {{:vinf_kod.zip|vinf_kod.zip}}.
+<code>
+git archive -o vinf_kod.zip HEAD                 # kód bez dát
+python -m zipfile -c nhl_data.zip data           # stiahnuté dáta (zip, nie rar)
+</code>
+
+Spúšťanie celého postupu:
+<code>
+python crawl.py          # stiahnutie (pokračuje po prerušení)
+python stats.py          # štatistika
+python extract.py        # data/ -> out/extracted/*.tsv  (--show <id>, --check)
+python index.py          # out/extracted -> out/index/*.tsv
+python search.py "slovak left wing"
+python evaluate.py       # P@10, R@100, MAP
+</code>

@@ -82,7 +82,7 @@ def crawl(max_pages, teams, sources, fresh, recrawl, headless):
           f"teams={','.join(sorted(teams)) or 'all'}" + (" recrawl" if recrawl else ""))
 
     browser, http = Browser(headless=headless), Http()
-    fetched = 0
+    fetched, url = 0, None
     try:
         while fetched < max_pages:
             url = frontier.pop()
@@ -158,6 +158,9 @@ def crawl(max_pages, teams, sources, fresh, recrawl, headless):
             frontier.save()
             time.sleep(random.uniform(delay_min, delay_max))
     except KeyboardInterrupt:
+        # the page being downloaded was already popped; put it back for the next run
+        if url and key(url) not in frontier.done and url not in frontier.queue:
+            frontier.queue.appendleft(url)
         print("\n[stop] interrupted, state saved")
     finally:
         frontier.save()

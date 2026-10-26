@@ -1,0 +1,19 @@
+qid	query	relevant	note
+q01	slovakia	nationality=Slovakia	nationality; bios of other players also mention Slovakia
+q02	born in kosice	birth_city=Kosice	small set (birthplace)
+q03	conn smythe trophy	awards~Conn Smythe	award
+q04	vezina trophy	awards~Vezina	award
+q05	first overall draft pick	draft_overall=1	the draft text has "pick 1 overall 1"; bios say "No. 1 pick"
+q06	edmonton oilers goalie	teams~Edmonton Oilers & position=G	two facts combined
+q07	sweden center	nationality=Sweden & position=C	two facts combined
+q08	hart memorial trophy mvp	awards~Hart Memorial	award; "mvp" appears in bios
+q09	calder trophy rookie of the year	awards~Calder	award
+q10	born in brantford ontario	birth_city=Brantford	small set; "ontario" matches thousands
+q11	czechia goaltender	nationality=Czechia & position=G	two facts combined
+q12	finland right wing	nationality=Finland & position=RW	"right wing" also matches R/RW of other countries
+q13	drafted by tampa bay lightning	draft_team=TBL	documents hold the code TBL; the team name only for those who played there
+q14	norris trophy defenseman	awards~Norris	award
+q15	head coach	type=coach & role~Head Coach	coaches
+q16	goaltending coach	type=coach & role~Goal & role~Coach	coaches
+q17	general manager	type=coach & role~General Manager	coaches, incl. assistant GMs
+q18	germany	nationality=Germany	nationality

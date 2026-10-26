@@ -86,6 +86,9 @@ class Browser:
         return FetchResult(status, page.url, page.content(), time.time() - start, error=error)
 
     def close(self):
-        self._context.close()
-        self._browser.close()
-        self._pw.stop()
+        # On Windows, Ctrl+C also kills Chromium, so it may already be gone.
+        for close in (self._context.close, self._browser.close, self._pw.stop):
+            try:
+                close()
+            except PlaywrightError:
+                pass

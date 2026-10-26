@@ -12,3 +12,6 @@ __pycache__/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Extracted documents and index (regenerated from data/)
+out/
